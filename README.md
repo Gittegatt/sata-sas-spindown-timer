@@ -1,10 +1,12 @@
-# TrueNAS SATA/SAS Spindown Timer
+# SATA/SAS Spindown Timer
 
-A lightweight SATA and SAS disk spindown timer for TrueNAS SCALE 25.10.
+A lightweight SATA and SAS disk spindown timer for Linux, made for and tested on TrueNAS SCALE 25.10.
 
 The script monitors real disk I/O through Linux kernel counters and puts an idle disk into standby after a configurable timeout. It is designed to avoid using normal disk reads as an activity probe, which could wake a sleeping disk.
 
-Current script version: `v1.0.0`
+Current script version: `v1.1.0`
+
+Formerly `truenas-sata-sas-spindown-timer`. Since v1.1.0 the script is called `sata-sas-spindown-timer.sh` and its lock file `/var/run/sata-sas-spindown-timer.lock`; update the path in your start command (cron job, Init/Shutdown Script) when you update from an earlier version. Links to the old repository name are forwarded by GitHub.
 
 ## Background and attribution
 
@@ -52,6 +54,7 @@ The simpler design also means that several upstream features are deliberately no
 - Optional status output
 - Single-instance protection with `flock`
 - One-shot execution mode
+- Status file for other tools, written after every poll (see [Status file](#status-file))
 
 ## Compatibility
 
@@ -65,7 +68,7 @@ Successfully tested with:
 | :--- | :--- |
 | `25.10.7` | Successfully tested |
 
-The script has been used with TrueNAS SCALE 25.10.x. It relies on Linux `/sys/block`, Bash, `smartctl`, and `flock`, so it is not intended for TrueNAS CORE / FreeBSD.
+The script has been used with TrueNAS SCALE 25.10.x. It relies only on Linux `/sys/block`, Bash, `smartctl`, and `flock`, so it also runs on other Linux systems (for example Debian or Proxmox); the TrueNAS-specific sections below (Ark patch, Init/Shutdown Scripts) then do not apply. It is not intended for TrueNAS CORE / FreeBSD.
 
 TrueNAS updates can change middleware behavior. If you use the Ark patch described below, check patch compatibility again after every TrueNAS update.
 
@@ -82,7 +85,13 @@ The following commands or facilities are required:
 The script creates its lock file at:
 
 ```text
-/var/run/truenas-sata-sas-spindown-timer.lock
+/var/run/sata-sas-spindown-timer.lock
+```
+
+and its status file at (can be changed with `-s`):
+
+```text
+/var/run/sata-sas-spindown-status
 ```
 
 Run it as root, for example with `sudo`.
@@ -92,7 +101,7 @@ Run it as root, for example with `sudo`.
 Copy the script to a persistent location and make it executable:
 
 ```bash
-chmod +x truenas-sata-sas-spindown-timer.sh
+chmod +x sata-sas-spindown-timer.sh
 ```
 
 Then run it with the desired options.
@@ -100,7 +109,7 @@ Then run it with the desired options.
 ## Usage
 
 ```text
-./truenas-sata-sas-spindown-timer.sh [-h] [-m] [-i <disk>] [-t <timeout>] [-p <poll>] [-o] [-c]
+./sata-sas-spindown-timer.sh [-h] [-m] [-i <disk>] [-t <timeout>] [-p <poll>] [-o] [-c] [-s <file>]
 ```
 
 Options:
@@ -113,6 +122,7 @@ Options:
 | `-i <disk>` | Disk to monitor, for example `sda`. Can be repeated |
 | `-o` | Run one loop iteration and exit |
 | `-c` | Print disk state on every poll. Spindown remains active |
+| `-s <file>` | Status file. Default: `/var/run/sata-sas-spindown-status` |
 | `-h` | Show help |
 
 ### Monitor selected disks only
@@ -120,35 +130,35 @@ Options:
 For example, monitor only `sda` and `sdd`:
 
 ```bash
-sudo ./truenas-sata-sas-spindown-timer.sh -m -i sda -i sdd
+sudo ./sata-sas-spindown-timer.sh -m -i sda -i sdd
 ```
 
 With a 30 minute idle timeout and a 60 second polling interval:
 
 ```bash
-sudo ./truenas-sata-sas-spindown-timer.sh -m -i sda -i sdd -t 1800 -p 60
+sudo ./sata-sas-spindown-timer.sh -m -i sda -i sdd -t 1800 -p 60
 ```
 
 Enable status output as well:
 
 ```bash
-sudo ./truenas-sata-sas-spindown-timer.sh -m -i sda -i sdd -t 1800 -p 60 -c
+sudo ./sata-sas-spindown-timer.sh -m -i sda -i sdd -t 1800 -p 60 -c
 ```
 
 When using an absolute path, the same command can look like this:
 
 ```bash
-/bin/bash /mnt/tank/scripts/truenas-sata-sas-spindown-timer/truenas-sata-sas-spindown-timer.sh -m -i sda -i sdd -t 1800 -p 60
+/bin/bash /mnt/tank/scripts/sata-sas-spindown-timer/sata-sas-spindown-timer.sh -m -i sda -i sdd -t 1800 -p 60
 ```
 
-Replace `/mnt/tank/scripts/truenas-sata-sas-spindown-timer` with the persistent location used on your system.
+Replace `/mnt/tank/scripts/sata-sas-spindown-timer` with the persistent location used on your system.
 
 ### Automatic mode: all `sd*` devices
 
 Without `-m`, the script detects all block devices whose names start with `sd`:
 
 ```bash
-sudo ./truenas-sata-sas-spindown-timer.sh
+sudo ./sata-sas-spindown-timer.sh
 ```
 
 Important: automatic mode does not check whether a device is rotational. An SSD or USB storage device exposed as `sdX` can therefore also be selected.
@@ -160,7 +170,7 @@ For mixed HDD/SSD systems, manual mode or the dynamic rotational selection below
 The following command dynamically detects `sd*` devices with `queue/rotational=1`, builds the corresponding `-m -i ...` arguments, and starts the timer in the foreground:
 
 ```bash
-ARGS=(-m); for p in /sys/block/sd*; do [[ -r "$p/queue/rotational" && "$(cat "$p/queue/rotational")" == "1" ]] && ARGS+=(-i "$(basename "$p")"); done; /bin/bash /mnt/tank/scripts/truenas-sata-sas-spindown-timer/truenas-sata-sas-spindown-timer.sh "${ARGS[@]}" -t 1800 -p 60
+ARGS=(-m); for p in /sys/block/sd*; do [[ -r "$p/queue/rotational" && "$(cat "$p/queue/rotational")" == "1" ]] && ARGS+=(-i "$(basename "$p")"); done; /bin/bash /mnt/tank/scripts/sata-sas-spindown-timer/sata-sas-spindown-timer.sh "${ARGS[@]}" -t 1800 -p 60
 ```
 
 This keeps the rotational-device filtering outside the timer itself. The timer receives only the detected HDDs through manual mode.
@@ -170,7 +180,7 @@ This keeps the rotational-device filtering outside the timer itself. The timer r
 For a long-running TrueNAS Init/Shutdown Script, a detached `tmux` session can be used. This example also logs the detected HDD list and script output:
 
 ```bash
-tmux has-session -t spindown-timer 2>/dev/null || tmux new-session -d -s spindown-timer "/bin/bash -lc 'ARGS=(-m); for p in /sys/block/sd*; do [[ -r \"\$p/queue/rotational\" && \"\$(cat \"\$p/queue/rotational\")\" == \"1\" ]] && ARGS+=(-i \"\$(basename \"\$p\")\"); done; echo \"===== spindown timer restart \$(date) =====\" >> /mnt/tank/scripts/truenas-sata-sas-spindown-timer/spindown.log; echo \"Detected HDDs: \${ARGS[*]}\" >> /mnt/tank/scripts/truenas-sata-sas-spindown-timer/spindown.log; /bin/bash /mnt/tank/scripts/truenas-sata-sas-spindown-timer/truenas-sata-sas-spindown-timer.sh \"\${ARGS[@]}\" -t 1800 -p 60' 2>&1 | tee -a /mnt/tank/scripts/truenas-sata-sas-spindown-timer/spindown.log"
+tmux has-session -t spindown-timer 2>/dev/null || tmux new-session -d -s spindown-timer "/bin/bash -lc 'ARGS=(-m); for p in /sys/block/sd*; do [[ -r \"\$p/queue/rotational\" && \"\$(cat \"\$p/queue/rotational\")\" == \"1\" ]] && ARGS+=(-i \"\$(basename \"\$p\")\"); done; echo \"===== spindown timer restart \$(date) =====\" >> /mnt/tank/scripts/sata-sas-spindown-timer/spindown.log; echo \"Detected HDDs: \${ARGS[*]}\" >> /mnt/tank/scripts/sata-sas-spindown-timer/spindown.log; /bin/bash /mnt/tank/scripts/sata-sas-spindown-timer/sata-sas-spindown-timer.sh \"\${ARGS[@]}\" -t 1800 -p 60' 2>&1 | tee -a /mnt/tank/scripts/sata-sas-spindown-timer/spindown.log"
 ```
 
 For TrueNAS, configure this as:
@@ -188,7 +198,7 @@ Replace the example `/mnt/tank/scripts/...` path with your actual persistent scr
 The same dynamic rotational-device selection can be started in the background with `nohup` instead of `tmux`:
 
 ```bash
-nohup /bin/bash -lc 'ARGS=(-m); for p in /sys/block/sd*; do [[ -r "$p/queue/rotational" && "$(cat "$p/queue/rotational")" == "1" ]] && ARGS+=(-i "$(basename "$p")"); done; /bin/bash /mnt/tank/scripts/truenas-sata-sas-spindown-timer/truenas-sata-sas-spindown-timer.sh "${ARGS[@]}" -t 1800 -p 60' >> /mnt/tank/scripts/truenas-sata-sas-spindown-timer/spindown.log 2>&1 &
+nohup /bin/bash -lc 'ARGS=(-m); for p in /sys/block/sd*; do [[ -r "$p/queue/rotational" && "$(cat "$p/queue/rotational")" == "1" ]] && ARGS+=(-i "$(basename "$p")"); done; /bin/bash /mnt/tank/scripts/sata-sas-spindown-timer/sata-sas-spindown-timer.sh "${ARGS[@]}" -t 1800 -p 60' >> /mnt/tank/scripts/sata-sas-spindown-timer/spindown.log 2>&1 &
 ```
 
 This version does not provide a detachable interactive session, but it prevents the long-running timer from blocking the Init task and keeps its output in `spindown.log`.
@@ -210,7 +220,7 @@ Pass only the desired results to the script with `-m` and repeated `-i` options.
 Example:
 
 ```bash
-sudo ./truenas-sata-sas-spindown-timer.sh -m -i sda -i sdd -t 1800 -p 60
+sudo ./sata-sas-spindown-timer.sh -m -i sda -i sdd -t 1800 -p 60
 ```
 
 Linux `sdX` names can change after a reboot. Always verify the device mapping before using a persistent list of device names.
@@ -262,6 +272,32 @@ It does not bypass the configured idle timeout. Since idle timers are initialize
 `-c` prints the state of each monitored disk on every poll, including the current idle time and I/O counter.
 
 Check mode is not a dry-run mode. Spindown remains enabled.
+
+## Status file
+
+After every poll the script writes one line per monitored disk to the status file
+(default `/var/run/sata-sas-spindown-status`, change it with `-s`):
+
+```text
+# disk state idle_s timeout_s poll_s updated_epoch
+sda ACTIVE 1200 1800 60 1760710800
+sdd STANDBY 600 1800 60 1760710800
+```
+
+| Field | Meaning |
+| --- | --- |
+| `disk` | Device name, e.g. `sda` |
+| `state` | `ACTIVE` or `STANDBY` |
+| `idle_s` | Seconds since the last detected I/O (reset to 0 when the script spins the disk down) |
+| `timeout_s` | Configured idle timeout (`-t`) |
+| `poll_s` | Configured poll interval (`-p`) |
+| `updated_epoch` | Time of this poll (Unix seconds) |
+
+Other tools, such as dashboards or status displays, can read this file to show disk state
+without querying the disks. The file is written to a temporary file first and then renamed, so readers never see a half-written file.
+If `updated_epoch` is older than about two poll intervals, the timer is probably not running.
+
+`/var/run` is kept in memory, so writing the file does not wake any disk.
 
 ## TrueNAS 25.10 and the Ark patch
 
@@ -356,6 +392,6 @@ This notice does not impose any additional restrictions, does not apply to third
 
 If you enjoy the project and would like to support its development, a small contribution is always appreciated.
 
-[Star on GitHub](https://github.com/Gittegatt/truenas-sata-sas-spindown-timer)
+[Star on GitHub](https://github.com/Gittegatt/sata-sas-spindown-timer)
 
 [Support on Ko-fi](https://ko-fi.com/gittegatt)
